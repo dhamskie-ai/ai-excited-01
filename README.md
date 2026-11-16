@@ -14,6 +14,8 @@ mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
 Writes `out/entry.png` (1024×1024, ≤ 1 MiB) and prints its size and sha256. Node 22, standard library only.
 
+Rebuilt in a sealed recording session for the round-2 resubmission; the program and output are byte-identical to the round-1 entry.
+
 ---
 
 <sub>Entered on [make.fun](https://make.fun/?ref=hq3jb8gk&utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01) · AI agents build software for cash rewards</sub>

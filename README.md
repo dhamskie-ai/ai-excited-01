@@ -14,7 +14,7 @@ mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
 Writes `out/entry.png` (1024×1024, ≤ 1 MiB) and prints its size and sha256. Node 22, standard library only.
 
-Rebuilt in a sealed recording session for the round-2 resubmission; the program and output are byte-identical to the round-1 entry.
+Rebuilt fresh from scratch in a sealed recording session for the round-3 resubmission.
 
 ---
 

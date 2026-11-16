@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: MIT
-// STARWHALE — a galaxy-sized luminous whale arcing through a nebula,
-// blowing a spiral of golden stars, with a tiny astronaut on its back.
-// Fully procedural, deterministic (fixed-seed PRNG), standard library only.
+// STARWHALE — a galaxy-sized luminous whale arcing across deep space,
+// blowing a spiral of golden stars, a tiny astronaut waving on its back.
+// Drawn fully procedurally, deterministically, standard library only.
+import { writeFileSync, mkdirSync } from "node:fs";
 import { deflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 
 const W = 1024;
 const H = 1024;
-const SEED = 20261116;
+const OUT_DIR = process.env.MAKEFUN_OUTPUT_DIR || "out";
+const OUT_PATH = OUT_DIR + "/entry.png";
 
-// ---------- PRNG (mulberry32, fixed seed) ----------
+// ---- deterministic PRNG (mulberry32, fixed seed) ----
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
   return function (): number {
@@ -22,9 +22,11 @@ function mulberry32(seed: number): () => number {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-const rand = mulberry32(SEED);
+const rand = mulberry32(20261116);
 
-// ---------- small helpers ----------
+// ---- float RGB buffer ----
+const buf = new Float32Array(W * H * 3);
+
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
@@ -35,114 +37,146 @@ function smoothstep(a: number, b: number, x: number): number {
   const t = clamp((x - a) / (b - a), 0, 1);
   return t * t * (3 - 2 * t);
 }
-type RGB = [number, number, number];
-function hex(h: string): RGB {
-  const n = parseInt(h.slice(1), 16);
-  return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
-}
-function mix3(c1: RGB, c2: RGB, t: number): RGB {
-  return [lerp(c1[0], c2[0], t), lerp(c1[1], c2[1], t), lerp(c1[2], c2[2], t)];
+function hexRgb(hex: string): [number, number, number] {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
-// ---------- float RGB buffer ----------
-const buf = new Float32Array(W * H * 3);
-
-function blendPx(x: number, y: number, r: number, g: number, b: number, a: number): void {
+// Source-over blend of one pixel.
+function paint(x: number, y: number, r: number, g: number, b: number, a: number): void {
   const xi = Math.round(x);
   const yi = Math.round(y);
-  if (xi < 0 || xi >= W || yi < 0 || yi >= H) return;
+  if (xi < 0 || yi < 0 || xi >= W || yi >= H) return;
   const i = (yi * W + xi) * 3;
-  const ia = 1 - a;
-  buf[i] = r * a + buf[i] * ia;
-  buf[i + 1] = g * a + buf[i + 1] * ia;
-  buf[i + 2] = b * a + buf[i + 2] * ia;
+  const inv = 1 - a;
+  buf[i] = buf[i] * inv + r * a;
+  buf[i + 1] = buf[i + 1] * inv + g * a;
+  buf[i + 2] = buf[i + 2] * inv + b * a;
 }
-function addPx(x: number, y: number, r: number, g: number, b: number, a: number): void {
+
+// Additive glow (clamped later at quantisation).
+function glow(x: number, y: number, r: number, g: number, b: number, a: number): void {
   const xi = Math.round(x);
   const yi = Math.round(y);
-  if (xi < 0 || xi >= W || yi < 0 || yi >= H) return;
+  if (xi < 0 || yi < 0 || xi >= W || yi >= H) return;
   const i = (yi * W + xi) * 3;
   buf[i] += r * a;
   buf[i + 1] += g * a;
   buf[i + 2] += b * a;
 }
 
-// Disk fill (source-over blend)
-function disk(cx: number, cy: number, rad: number, c: RGB, a: number): void {
-  const r = Math.max(0.5, rad);
-  const x0 = Math.max(0, Math.floor(cx - r));
-  const x1 = Math.min(W - 1, Math.ceil(cx + r));
-  const y0 = Math.max(0, Math.floor(cy - r));
-  const y1 = Math.min(H - 1, Math.ceil(cy + r));
-  for (let y = y0; y <= y1; y++) {
-    for (let x = x0; x <= x1; x++) {
-      const dx = x + 0.5 - cx;
-      const dy = y + 0.5 - cy;
-      const d = Math.sqrt(dx * dx + dy * dy);
-      if (d <= r) {
-        // soft 1px edge
-        const edge = clamp(r - d + 0.5, 0, 1);
-        blendPx(x, y, c[0], c[1], c[2], a * edge);
-      }
+// ---- sky: vertical multi-stop gradient ----
+function drawSky(): void {
+  const stops: Array<[number, [number, number, number]]> = [
+    [0.0, hexRgb("#050514")],
+    [0.35, hexRgb("#0d0b2e")],
+    [0.65, hexRgb("#1a0f3c")],
+    [1.0, hexRgb("#04263b")],
+  ];
+  for (let y = 0; y < H; y++) {
+    const t = y / (H - 1);
+    let s = 0;
+    while (s < stops.length - 2 && t > stops[s + 1][0]) s++;
+    const [t0, c0] = stops[s];
+    const [t1, c1] = stops[s + 1];
+    const f = clamp((t - t0) / (t1 - t0), 0, 1);
+    const r = lerp(c0[0], c1[0], f);
+    const g = lerp(c0[1], c1[1], f);
+    const b = lerp(c0[2], c1[2], f);
+    let i = y * W * 3;
+    for (let x = 0; x < W; x++) {
+      buf[i] = r;
+      buf[i + 1] = g;
+      buf[i + 2] = b;
+      i += 3;
     }
   }
 }
 
-// Soft radial glow blob (additive)
-function glow(cx: number, cy: number, rad: number, c: RGB, a: number): void {
-  const x0 = Math.max(0, Math.floor(cx - rad));
-  const x1 = Math.min(W - 1, Math.ceil(cx + rad));
-  const y0 = Math.max(0, Math.floor(cy - rad));
-  const y1 = Math.min(H - 1, Math.ceil(cy + rad));
-  for (let y = y0; y <= y1; y++) {
-    for (let x = x0; x <= x1; x++) {
-      const dx = x + 0.5 - cx;
-      const dy = y + 0.5 - cy;
-      const d = Math.sqrt(dx * dx + dy * dy) / rad;
-      if (d < 1) {
-        const f = smoothstep(1, 0, d);
-        addPx(x, y, c[0], c[1], c[2], a * f);
-      }
+// ---- PNG encoder (signature, IHDR, IDAT, IEND, table CRC32) ----
+const CRC_TABLE: Uint32Array = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
     }
+    table[n] = c >>> 0;
   }
+  return table;
+})();
+
+function crc32(data: Uint8Array): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < data.length; i++) {
+    c = CRC_TABLE[(c ^ data[i]) & 0xff] ^ (c >>> 8);
+  }
+  return (c ^ 0xffffffff) >>> 0;
 }
 
-// Thick line as a chain of disks along sampled points
-function thickLine(pts: Array<[number, number]>, thick: number, c: RGB, a: number): void {
-  const r = thick / 2;
-  for (let i = 0; i < pts.length; i++) {
-    disk(pts[i][0], pts[i][1], r, c, a);
-  }
-}
-
-// Quadratic bezier sampler
-function quad(p0: [number, number], p1: [number, number], p2: [number, number], n: number): Array<[number, number]> {
-  const out: Array<[number, number]> = [];
-  for (let i = 0; i <= n; i++) {
-    const t = i / n;
-    const u = 1 - t;
-    out.push([
-      u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0],
-      u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1],
-    ]);
-  }
+function chunk(type: string, data: Uint8Array): Uint8Array {
+  const out = new Uint8Array(12 + data.length);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, data.length);
+  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+  out.set(data, 8);
+  const crcData = new Uint8Array(4 + data.length);
+  crcData.set(out.subarray(4, 8), 0);
+  crcData.set(data, 4);
+  view.setUint32(8 + data.length, crc32(crcData));
   return out;
 }
 
-// ---------- geometry ----------
+function encodePng(): Uint8Array {
+  const raw = new Uint8Array(H * (1 + W * 3));
+  for (let y = 0; y < H; y++) {
+    raw[y * (1 + W * 3)] = 0; // filter byte: none
+    let o = y * (1 + W * 3) + 1;
+    let i = y * W * 3;
+    for (let x = 0; x < W; x++) {
+      raw[o++] = clamp(Math.round(buf[i]), 0, 255);
+      raw[o++] = clamp(Math.round(buf[i + 1]), 0, 255);
+      raw[o++] = clamp(Math.round(buf[i + 2]), 0, 255);
+      i += 3;
+    }
+  }
+  const ihdr = new Uint8Array(13);
+  const iv = new DataView(ihdr.buffer);
+  iv.setUint32(0, W);
+  iv.setUint32(4, H);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // colour type RGB
+  ihdr[10] = 0; // compression
+  ihdr[11] = 0; // filter
+  ihdr[12] = 0; // interlace
+  const idat = deflateSync(raw, { level: 9 });
+  const sig = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  const parts = [sig, chunk("IHDR", ihdr), chunk("IDAT", idat), chunk("IEND", new Uint8Array(0))];
+  let total = 0;
+  for (const p of parts) total += p.length;
+  const png = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) {
+    png.set(p, off);
+    off += p.length;
+  }
+  return png;
+}
+
+// ---- geometry helpers ----
 type Pt = [number, number];
 
-// Closed Catmull-Rom spline through control points, samples per segment
-function catmullRomClosed(pts: Array<Pt>, samplesPerSeg: number): Array<Pt> {
+// Closed Catmull-Rom spline through control points, ~16 samples per segment.
+function closedSpline(pts: Pt[], perSeg: number): Pt[] {
+  const out: Pt[] = [];
   const n = pts.length;
-  const out: Array<Pt> = [];
   for (let i = 0; i < n; i++) {
     const p0 = pts[(i - 1 + n) % n];
     const p1 = pts[i];
     const p2 = pts[(i + 1) % n];
     const p3 = pts[(i + 2) % n];
-    for (let s = 0; s < samplesPerSeg; s++) {
-      const t = s / samplesPerSeg;
+    for (let s = 0; s < perSeg; s++) {
+      const t = s / perSeg;
       const t2 = t * t;
       const t3 = t2 * t;
       const x =
@@ -163,18 +197,17 @@ function catmullRomClosed(pts: Array<Pt>, samplesPerSeg: number): Array<Pt> {
   return out;
 }
 
-// Open Catmull-Rom spline through control points
-function catmullRomOpen(pts: Array<Pt>, samplesPerSeg: number): Array<Pt> {
-  const n = pts.length;
-  const ext: Array<Pt> = [pts[0], ...pts, pts[n - 1]];
-  const out: Array<Pt> = [];
-  for (let i = 0; i < n - 1; i++) {
+// Open Catmull-Rom through points (endpoints duplicated), for curves.
+function openSpline(pts: Pt[], perSeg: number): Pt[] {
+  const ext: Pt[] = [pts[0], ...pts, pts[pts.length - 1]];
+  const out: Pt[] = [];
+  for (let i = 0; i < ext.length - 3; i++) {
     const p0 = ext[i];
     const p1 = ext[i + 1];
     const p2 = ext[i + 2];
     const p3 = ext[i + 3];
-    for (let s = 0; s < samplesPerSeg; s++) {
-      const t = s / samplesPerSeg;
+    for (let s = 0; s < perSeg; s++) {
+      const t = s / perSeg;
       const t2 = t * t;
       const t3 = t2 * t;
       const x =
@@ -192,12 +225,12 @@ function catmullRomOpen(pts: Array<Pt>, samplesPerSeg: number): Array<Pt> {
       out.push([x, y]);
     }
   }
-  out.push([pts[n - 1][0], pts[n - 1][1]]);
+  out.push(pts[pts.length - 1]);
   return out;
 }
 
-// Ray-casting point-in-polygon
-function pointInPolygon(x: number, y: number, poly: Array<Pt>): boolean {
+// Ray-casting point-in-polygon test.
+function insidePoly(x: number, y: number, poly: Pt[]): boolean {
   let inside = false;
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
     const xi = poly[i][0];
@@ -211,445 +244,352 @@ function pointInPolygon(x: number, y: number, poly: Array<Pt>): boolean {
   return inside;
 }
 
-// Scanline polygon fill; colorFn(y) returns [r,g,b,a] for that scanline
-function fillPolygon(poly: Array<Pt>, colorFn: (y: number) => [number, number, number, number]): void {
-  let minY = Infinity;
-  let maxY = -Infinity;
+// Scanline fill of a polygon. colourFn(x, y) returns [r, g, b, a].
+function fillPoly(poly: Pt[], colourFn: (x: number, y: number) => [number, number, number, number]): void {
+  let minY = H;
+  let maxY = 0;
   for (const p of poly) {
-    if (p[1] < minY) minY = p[1];
-    if (p[1] > maxY) maxY = p[1];
+    minY = Math.min(minY, Math.floor(p[1]));
+    maxY = Math.max(maxY, Math.ceil(p[1]));
   }
-  const y0 = Math.max(0, Math.floor(minY));
-  const y1 = Math.min(H - 1, Math.ceil(maxY));
-  for (let y = y0; y <= y1; y++) {
+  minY = clamp(minY, 0, H - 1);
+  maxY = clamp(maxY, 0, H - 1);
+  const xs: number[] = [];
+  for (let y = minY; y <= maxY; y++) {
+    xs.length = 0;
     const yc = y + 0.5;
-    const xs: Array<number> = [];
     for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-      const xi = poly[i][0];
-      const yi = poly[i][1];
-      const xj = poly[j][0];
-      const yj = poly[j][1];
-      if ((yi <= yc && yj > yc) || (yj <= yc && yi > yc)) {
-        xs.push(xi + ((yc - yi) * (xj - xi)) / (yj - yi));
+      const [xi, yi] = poly[i];
+      const [xj, yj] = poly[j];
+      if (yi > yc !== yj > yc) {
+        xs.push(((xj - xi) * (yc - yi)) / (yj - yi) + xi);
       }
     }
     xs.sort((a, b) => a - b);
-    const [r, g, b, a] = colorFn(y);
     for (let k = 0; k + 1 < xs.length; k += 2) {
-      const xStart = Math.max(0, Math.ceil(xs[k] - 0.5));
-      const xEnd = Math.min(W - 1, Math.floor(xs[k + 1] - 0.5));
-      for (let x = xStart; x <= xEnd; x++) {
-        blendPx(x, y, r, g, b, a);
+      const x0 = clamp(Math.ceil(xs[k]), 0, W - 1);
+      const x1 = clamp(Math.floor(xs[k + 1]), 0, W - 1);
+      for (let x = x0; x <= x1; x++) {
+        const [r, g, b, a] = colourFn(x, y);
+        paint(x, y, r, g, b, a);
       }
     }
   }
 }
 
-// ================= SCENE =================
-
-// 1. Sky: vertical gradient
-{
-  const stops: Array<[number, RGB]> = [
-    [0, hex("#050514")],
-    [0.33, hex("#0d0b2e")],
-    [0.66, hex("#1a0f3c")],
-    [1, hex("#04263b")],
-  ];
-  for (let y = 0; y < H; y++) {
-    const t = y / (H - 1);
-    let c: RGB = stops[0][1];
-    for (let s = 0; s < stops.length - 1; s++) {
-      if (t >= stops[s][0] && t <= stops[s + 1][0]) {
-        const lt = (t - stops[s][0]) / (stops[s + 1][0] - stops[s][0]);
-        c = mix3(stops[s][1], stops[s + 1][1], lt);
-        break;
-      }
-    }
-    for (let x = 0; x < W; x++) {
-      const i = (y * W + x) * 3;
-      buf[i] = c[0];
-      buf[i + 1] = c[1];
-      buf[i + 2] = c[2];
-    }
-  }
-}
-
-// 2. Nebula clouds (soft additive radial blobs)
-glow(750, 220, 260, hex("#ff2d78"), 0.16);
-glow(250, 750, 300, hex("#00e5c7"), 0.12);
-glow(850, 800, 220, hex("#ffb347"), 0.1);
-
-// Whale body outline (defined early: stars must avoid it)
-const whaleCtrl: Array<Pt> = [
-  [150, 470],
-  [230, 400],
-  [360, 350],
-  [520, 330],
-  [680, 345],
-  [800, 380],
-  [880, 420],
-  [960, 300],
-  [905, 440],
-  [955, 540],
-  [880, 470],
-  [760, 520],
-  [600, 545],
-  [430, 540],
-  [290, 510],
-  [190, 490],
-];
-const whalePoly = catmullRomClosed(whaleCtrl, 16);
-
-// 3. Stars (~500 seeded), never inside the whale body
-{
-  const starCols: Array<RGB> = [hex("#ffffff"), hex("#cfe4ff"), hex("#ffe9a8")];
-  const bright: Array<[number, number, number]> = [];
-  let placed = 0;
-  let guard = 0;
-  while (placed < 500 && guard < 4000) {
-    guard++;
-    const x = rand() * W;
-    const y = rand() * H;
-    if (pointInPolygon(x, y, whalePoly)) continue;
-    const r = 0.5 + rand() * 1.5;
-    const a = 0.4 + rand() * 0.6;
-    const c = starCols[Math.floor(rand() * starCols.length)];
-    disk(x, y, r, c, a);
-    if (r > 1.4 && a > 0.8) bright.push([x, y, r]);
-    placed++;
-  }
-  // 4-point sparkle on the brightest ~20
-  bright.sort((p, q) => q[2] - p[2]);
-  const spark = bright.slice(0, 20);
-  for (const [x, y] of spark) {
-    const L = 7;
-    for (let d = -L; d <= L; d++) {
-      blendPx(x + d, y, 1, 1, 1, 0.75 * (1 - Math.abs(d) / (L + 1)));
-      blendPx(x, y + d, 1, 1, 1, 0.75 * (1 - Math.abs(d) / (L + 1)));
-    }
-  }
-}
-
-// 4. Ringed planet at (830, 150), r 55
-{
-  const cx = 830;
-  const cy = 150;
-  const R = 55;
-  const tilt = (-20 * Math.PI) / 180;
-  const rx = 96;
-  const ry = 26;
-  const ringCol = hex("#ffe9a8");
-  const ellipsePt = (theta: number): Pt => {
-    const ex = rx * Math.cos(theta);
-    const ey = ry * Math.sin(theta);
-    return [
-      cx + ex * Math.cos(tilt) - ey * Math.sin(tilt),
-      cy + ex * Math.sin(tilt) + ey * Math.cos(tilt),
-    ];
-  };
-  // back arc (theta pi..2pi) behind the disc
-  {
-    const pts: Array<Pt> = [];
-    for (let i = 0; i <= 60; i++) {
-      pts.push(ellipsePt(Math.PI + (i / 60) * Math.PI));
-    }
-    thickLine(pts, 3, ringCol, 0.8);
-  }
-  // disc with horizontal bands
-  const bands: Array<RGB> = [hex("#ffb37a"), hex("#7a5cff"), hex("#ffe9c9")];
-  for (let y = Math.floor(cy - R); y <= Math.ceil(cy + R); y++) {
-    const dy = y + 0.5 - cy;
-    const half = Math.sqrt(Math.max(0, R * R - dy * dy));
-    const band = Math.floor((y - (cy - R)) / 13) % 3;
-    const shade = 1 - 0.25 * smoothstep(0, R, Math.abs(dy));
-    const c = bands[band];
-    for (let x = Math.ceil(cx - half); x <= Math.floor(cx + half); x++) {
-      blendPx(x, y, c[0] * shade, c[1] * shade, c[2] * shade, 1);
-    }
-  }
-  // front arc (theta 0..pi) over the disc
-  {
-    const pts: Array<Pt> = [];
-    for (let i = 0; i <= 60; i++) {
-      pts.push(ellipsePt((i / 60) * Math.PI));
-    }
-    thickLine(pts, 3, ringCol, 0.8);
-  }
-}
-
-// Second tiny distant planet at (120, 820), r 22
-{
-  const cx = 120;
-  const cy = 820;
-  const R = 22;
-  const rose = hex("#c96a8a");
-  const dark = hex("#6e2b47");
-  for (let y = Math.floor(cy - R); y <= Math.ceil(cy + R); y++) {
-    for (let x = Math.floor(cx - R); x <= Math.ceil(cx + R); x++) {
+// Filled disk (source-over).
+function fillDisk(cx: number, cy: number, r: number, colour: [number, number, number], a: number): void {
+  const [cr, cg, cb] = colour;
+  const r2 = r * r;
+  const x0 = clamp(Math.floor(cx - r), 0, W - 1);
+  const x1 = clamp(Math.ceil(cx + r), 0, W - 1);
+  const y0 = clamp(Math.floor(cy - r), 0, H - 1);
+  const y1 = clamp(Math.ceil(cy + r), 0, H - 1);
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
       const dx = x + 0.5 - cx;
       const dy = y + 0.5 - cy;
-      if (dx * dx + dy * dy <= R * R) {
-        // crescent shadow: offset dark disk upper-right
-        const sx = x + 0.5 - (cx + 9);
-        const sy = y + 0.5 - (cy - 7);
-        if (sx * sx + sy * sy <= R * R) {
-          blendPx(x, y, dark[0], dark[1], dark[2], 0.55);
-        } else {
-          blendPx(x, y, rose[0], rose[1], rose[2], 1);
-        }
+      if (dx * dx + dy * dy <= r2) paint(x, y, cr, cg, cb, a);
+    }
+  }
+}
+
+// Soft radial glow disk (additive, smooth falloff to the edge).
+function glowDisk(cx: number, cy: number, r: number, colour: [number, number, number], a: number): void {
+  const [cr, cg, cb] = colour;
+  const r2 = r * r;
+  const x0 = clamp(Math.floor(cx - r), 0, W - 1);
+  const x1 = clamp(Math.ceil(cx + r), 0, W - 1);
+  const y0 = clamp(Math.floor(cy - r), 0, H - 1);
+  const y1 = clamp(Math.ceil(cy + r), 0, H - 1);
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const dx = x + 0.5 - cx;
+      const dy = y + 0.5 - cy;
+      const d2 = dx * dx + dy * dy;
+      if (d2 <= r2) {
+        const fall = 1 - smoothstep(0.2, 1.0, Math.sqrt(d2) / r);
+        glow(x, y, cr, cg, cb, a * fall);
       }
     }
   }
 }
 
-// 5. Whale
-// Rim light: same shape shifted up 6px, glowing cyan, drawn first
-{
-  const shifted = whalePoly.map(([x, y]): Pt => [x, y - 6]);
-  fillPolygon(shifted, () => [0.75, 0.95, 1, 0.5]);
-}
-// Body fill: vertical gradient #6a5cff -> #2a1a8f
-{
-  let minY = Infinity;
-  let maxY = -Infinity;
-  for (const p of whalePoly) {
-    if (p[1] < minY) minY = p[1];
-    if (p[1] > maxY) maxY = p[1];
+// Thick line as a chain of disks along sampled points.
+function thickLine(pts: Pt[], width: number, colour: [number, number, number], a: number): void {
+  const step = Math.max(1, Math.floor(width / 3));
+  for (let i = 0; i < pts.length; i += step) {
+    fillDisk(pts[i][0], pts[i][1], width / 2, colour, a);
   }
-  const top = hex("#6a5cff");
-  const bot = hex("#2a1a8f");
-  fillPolygon(whalePoly, (y) => {
-    const c = mix3(top, bot, clamp((y - minY) / (maxY - minY), 0, 1));
-    return [c[0], c[1], c[2], 1];
-  });
+  const last = pts[pts.length - 1];
+  fillDisk(last[0], last[1], width / 2, colour, a);
 }
-// Belly band: lower chain inset ~25px upward
-{
-  // find sampled index nearest tail-stock-bottom (880, 470)
-  let idx = 0;
-  let best = Infinity;
-  for (let i = 0; i < whalePoly.length; i++) {
-    const d = Math.hypot(whalePoly[i][0] - 880, whalePoly[i][1] - 470);
-    if (d < best) {
-      best = d;
-      idx = i;
+
+// Small 4-point sparkle (plus-shaped cross) at a point.
+function sparkle(cx: number, cy: number, len: number, colour: [number, number, number], a: number): void {
+  const [r, g, b] = colour;
+  for (let d = -len; d <= len; d++) {
+    const f = 1 - Math.abs(d) / (len + 1);
+    paint(cx + d, cy, r, g, b, a * f);
+    paint(cx, cy + d, r, g, b, a * f);
+  }
+}
+
+// Soft radial nebula blob, added (low alpha).
+function nebula(cx: number, cy: number, radius: number, colour: [number, number, number], a: number): void {
+  glowDisk(cx, cy, radius, colour, a);
+}
+
+// ---- whale body (hero) ----
+const BODY_PTS: Pt[] = [
+  [150, 470], [230, 400], [360, 350], [520, 330], [680, 345], [800, 380],
+  [880, 420], [960, 300], [905, 440], [955, 540], [880, 470], [760, 520],
+  [600, 545], [430, 540], [290, 510], [190, 490],
+];
+const BODY_POLY: Pt[] = closedSpline(BODY_PTS, 16);
+
+function drawStars(): void {
+  const palette: Array<[number, number, number]> = [
+    [255, 255, 255],
+    [200, 220, 255],
+    [255, 220, 150],
+  ];
+  type Star = { x: number; y: number; r: number; c: [number, number, number]; a: number; bright: number };
+  const stars: Star[] = [];
+  for (let i = 0; i < 520; i++) {
+    const x = rand() * W;
+    const y = rand() * H;
+    if (insidePoly(x, y, BODY_POLY)) continue;
+    const bright = rand();
+    const r = 0.5 + rand() * 1.5;
+    const a = 0.4 + rand() * 0.6;
+    const c = palette[Math.floor(rand() * palette.length)];
+    stars.push({ x, y, r, c, a, bright });
+  }
+  for (const s of stars) {
+    fillDisk(s.x, s.y, s.r, s.c, s.a);
+    if (s.r >= 1.6) glowDisk(s.x, s.y, s.r * 2.2, s.c, 0.25);
+  }
+  // Brightest ~20 get a small 4-point sparkle.
+  const sorted = [...stars].sort((a, b) => b.bright - a.bright).slice(0, 20);
+  for (const s of sorted) {
+    sparkle(s.x, s.y, 4 + Math.floor(rand() * 3), s.c, 0.9);
+  }
+}
+
+function drawPlanets(): void {
+  // Ringed planet, centre (830, 150), radius 55.
+  const cx = 830;
+  const cy = 150;
+  const r = 55;
+  const tilt = (-20 * Math.PI) / 180;
+  const cosT = Math.cos(tilt);
+  const sinT = Math.sin(tilt);
+  const ringCol = hexRgb("#ffe9a8");
+  // Back half of the tilted ring (far side), drawn before the disc.
+  const backPts: Pt[] = [];
+  const frontPts: Pt[] = [];
+  for (let i = 0; i <= 120; i++) {
+    const th = (i / 120) * Math.PI * 2;
+    const lx = 95 * Math.cos(th);
+    const ly = 22 * Math.sin(th);
+    const px = cx + lx * cosT - ly * sinT;
+    const py = cy + lx * sinT + ly * cosT;
+    if (Math.sin(th) < 0) backPts.push([px, py]);
+    else frontPts.push([px, py]);
+  }
+  thickLine(backPts, 3, ringCol, 0.8);
+  // Disc: horizontal bands of peach / violet / pale.
+  const bands: Array<[number, number, number]> = [hexRgb("#ffb37a"), hexRgb("#7a5cff"), hexRgb("#ffe9c9")];
+  for (let y = Math.floor(cy - r); y <= Math.ceil(cy + r); y++) {
+    const dy = y + 0.5 - cy;
+    const half = Math.sqrt(Math.max(0, r * r - dy * dy));
+    const band = bands[Math.abs(Math.floor((y - (cy - r)) / 9)) % 3];
+    for (let x = Math.ceil(cx - half); x <= Math.floor(cx + half); x++) {
+      paint(x, y, band[0], band[1], band[2], 1);
     }
   }
-  const lower: Array<Pt> = [];
-  for (let k = 0; k < whalePoly.length; k++) {
-    const i = (idx + k) % whalePoly.length;
-    lower.push(whalePoly[i]);
-    if (Math.hypot(whalePoly[i][0] - 150, whalePoly[i][1] - 470) < 4) break;
+  // Front half of the ring, over the disc.
+  thickLine(frontPts, 3, ringCol, 0.8);
+  // Tiny distant planet (120, 820), radius 22, dusty rose + crescent shadow.
+  const px2 = 120;
+  const py2 = 820;
+  const pr = 22;
+  const rose = hexRgb("#c96a8a");
+  fillDisk(px2, py2, pr, rose, 1);
+  const shadow = hexRgb("#6a2a4a");
+  for (let y = Math.floor(py2 - pr); y <= Math.ceil(py2 + pr); y++) {
+    for (let x = Math.floor(px2 - pr); x <= Math.ceil(px2 + pr); x++) {
+      const dx = x + 0.5 - px2;
+      const dy = y + 0.5 - py2;
+      if (dx * dx + dy * dy > pr * pr) continue;
+      const sdx = x + 0.5 - (px2 + 9);
+      const sdy = y + 0.5 - (py2 - 5);
+      if (sdx * sdx + sdy * sdy <= 19 * 19) {
+        paint(x, y, shadow[0], shadow[1], shadow[2], 0.5);
+      }
+    }
   }
-  const band: Array<Pt> = [...lower];
-  for (let k = lower.length - 1; k >= 0; k--) {
-    band.push([lower[k][0], lower[k][1] - 26]);
+}
+
+function drawWhale(): void {
+  // Rim light: same shape shifted up 6 px, glowing cyan, drawn first.
+  const rimPoly: Pt[] = BODY_POLY.map(([x, y]): Pt => [x, y - 6]);
+  const rimCol = hexRgb("#bff3ff");
+  fillPoly(rimPoly, () => [rimCol[0], rimCol[1], rimCol[2], 0.5]);
+  // Body fill: vertical gradient #6a5cff (top) -> #2a1a8f (bottom).
+  const topCol = hexRgb("#6a5cff");
+  const botCol = hexRgb("#2a1a8f");
+  let minY = H;
+  let maxY = 0;
+  for (const p of BODY_POLY) {
+    minY = Math.min(minY, p[1]);
+    maxY = Math.max(maxY, p[1]);
   }
-  const belly = hex("#b9a7ff");
-  fillPolygon(band, () => [belly[0], belly[1], belly[2], 0.35]);
-}
-// Mouth: gently upturned curve (170,478) -> (300,500)
-{
-  const pts = quad([170, 478], [235, 503], [300, 500], 100);
-  thickLine(pts, 4, hex("#14104a"), 0.9);
-}
-// Pectoral fin: curved triangle (430,535) -> (560,640) -> (520,520)
-{
-  const e1 = quad([430, 535], [520, 612], [560, 640], 24);
-  const e2 = quad([560, 640], [545, 575], [520, 520], 24);
-  const finPoly: Array<Pt> = [...e1, ...e2];
-  const fin = hex("#2c1f9e");
-  fillPolygon(finPoly, () => [fin[0], fin[1], fin[2], 1]);
-  // thin rim-light line on the upper edge (520,520) -> (430,535)
-  const rim = quad([520, 520], [475, 522], [430, 535], 20);
-  thickLine(rim, 2, hex("#bff3ff"), 0.7);
-}
-// Star speckles on the body (~120 seeded, inside polygon only)
-{
+  fillPoly(BODY_POLY, (x, y) => {
+    const t = clamp((y - minY) / (maxY - minY), 0, 1);
+    return [lerp(topCol[0], botCol[0], t), lerp(topCol[1], botCol[1], t), lerp(topCol[2], botCol[2], t), 1];
+  });
+  // Belly band: smaller smooth shape hugging the bottom edge.
+  const bellyPts: Pt[] = [
+    [190, 490], [290, 510], [430, 540], [600, 545], [760, 520], [880, 470],
+    [880, 445], [760, 495], [600, 520], [430, 515], [290, 485], [190, 465],
+  ];
+  const bellyPoly = closedSpline(bellyPts, 12);
+  const bellyCol = hexRgb("#b9a7ff");
+  fillPoly(bellyPoly, () => [bellyCol[0], bellyCol[1], bellyCol[2], 0.35]);
+  // Mouth: gently upturned curve from (170, 478) to (300, 500).
+  const mouth = openSpline([[170, 478], [220, 492], [300, 500]], 10);
+  thickLine(mouth, 4, hexRgb("#14104a"), 1);
+  // Eye at (225, 440): white disk, dark pupil, highlight dot up-left.
+  fillDisk(225, 440, 7, [255, 255, 255], 1);
+  fillDisk(225, 440, 3.5, hexRgb("#14104a"), 1);
+  fillDisk(222, 437, 1.5, [255, 255, 255], 1);
+  // Pectoral fin: curved triangle from the belly sweeping down-right.
+  const finPts: Pt[] = [[430, 535], [560, 640], [520, 520]];
+  const finPoly = closedSpline(finPts, 14);
+  const finCol = hexRgb("#2c1f9e");
+  fillPoly(finPoly, () => [finCol[0], finCol[1], finCol[2], 1]);
+  // Thin rim-light line on the fin's upper edge.
+  const finEdge = openSpline([[430, 535], [480, 520], [520, 520]], 8);
+  thickLine(finEdge, 2, hexRgb("#bff3ff"), 0.6);
+  // Star speckles on the body: ~120 seeded dots kept inside the body.
   let placed = 0;
-  let guard = 0;
-  while (placed < 120 && guard < 3000) {
-    guard++;
-    const x = 140 + rand() * 830;
-    const y = 300 + rand() * 250;
-    if (!pointInPolygon(x, y, whalePoly)) continue;
-    const c = rand() < 0.6 ? hex("#ffffff") : hex("#ffe9a8");
-    disk(x, y, 0.5 + rand() * 1.0, c, 0.5 + rand() * 0.5);
+  let tries = 0;
+  while (placed < 120 && tries < 900) {
+    tries++;
+    const x = 150 + rand() * 810;
+    const y = 300 + rand() * 245;
+    if (!insidePoly(x, y, BODY_POLY)) continue;
+    const gold = rand() > 0.5;
+    const c: [number, number, number] = gold ? [255, 220, 150] : [255, 255, 255];
+    fillDisk(x, y, 0.5 + rand() * 1.0, c, 0.5 + rand() * 0.5);
     placed++;
   }
-}
-// Eye at (225, 440)
-disk(225, 440, 7, hex("#ffffff"), 1);
-disk(226, 441, 3.5, hex("#14104a"), 1);
-disk(222.5, 437.5, 1.5, hex("#ffffff"), 1);
-// Soft glow dots along the top edge
-{
-  const topChain: Array<Pt> = [
-    [150, 470],
-    [230, 400],
-    [360, 350],
-    [520, 330],
-    [680, 345],
-    [800, 380],
-    [880, 420],
-  ];
-  const edge = catmullRomOpen(topChain, 8);
-  for (let i = 4; i < edge.length - 4; i += 14) {
-    glow(edge[i][0], edge[i][1] - 2, 10, hex("#bff3ff"), 0.35);
+  // Row of soft glow dots along the top edge.
+  const topEdge = openSpline([[230, 400], [360, 350], [520, 330], [680, 345], [800, 380]], 12);
+  for (let i = 0; i < topEdge.length; i += 6) {
+    glowDisk(topEdge[i][0], topEdge[i][1], 7, hexRgb("#bff3ff"), 0.22);
   }
 }
 
-// 6. Star trail: spiral from the mouth up-left, arcing across the top to (700, 120)
-{
-  const spiralCtrl: Array<Pt> = [
-    [170, 480],
-    [80, 360],
-    [70, 260],
-    [180, 170],
-    [360, 120],
-    [540, 105],
-    [700, 120],
-  ];
-  const path = catmullRomOpen(spiralCtrl, 24);
-  // faint golden ribbon under the stars
-  for (let i = 0; i < path.length; i += 3) {
-    glow(path[i][0], path[i][1], 15, hex("#ffb347"), 0.08);
+// ---- star trail: spiral of golden stars from the mouth ----
+function drawTrail(): void {
+  const path = openSpline(
+    [[170, 480], [120, 420], [90, 340], [140, 250], [250, 180], [400, 140], [550, 125], [700, 120]],
+    10
+  );
+  // Faint golden ribbon under the stars: overlapping soft circles.
+  for (let i = 0; i < path.length; i += 2) {
+    glowDisk(path[i][0], path[i][1], 16, hexRgb("#ffb347"), 0.08);
   }
-  // ~40 stars, shrinking 7 -> 2 px, gold/white
-  const N = 40;
-  for (let k = 0; k < N; k++) {
-    const t = k / (N - 1);
+  // ~40 stars along the path, sizes shrinking 7 -> 2 px, gold / white.
+  const count = 40;
+  for (let i = 0; i < count; i++) {
+    const t = i / (count - 1);
     const idx = Math.min(path.length - 1, Math.floor(t * (path.length - 1)));
     const [x, y] = path[idx];
-    const r = lerp(7, 2, t);
-    const c = k % 3 === 0 ? hex("#ffffff") : hex("#ffd76a");
-    glow(x, y, r * 2.2, hex("#ffb347"), 0.5);
-    disk(x, y, r, c, 1);
-    if (k % 5 === 0) {
-      // tiny sparkle cross on every 5th star
-      for (let d = -5; d <= 5; d++) {
-        blendPx(x + d, y, 1, 1, 1, 0.6 * (1 - Math.abs(d) / 6));
-        blendPx(x, y + d, 1, 1, 1, 0.6 * (1 - Math.abs(d) / 6));
-      }
+    const size = lerp(7, 2, t);
+    const gold = rand() > 0.35;
+    const c: [number, number, number] = gold ? [255, 200, 90] : [255, 255, 255];
+    fillDisk(x, y, size, c, 1);
+    glowDisk(x, y, size * 2.4, c, 0.35);
+    if (size >= 5) sparkle(x, y, Math.round(size), c, 0.8);
+  }
+}
+
+// ---- tiny astronaut standing on the whale's back ----
+function drawAstronaut(): void {
+  const white: [number, number, number] = [255, 255, 255];
+  // Helmet: white circle radius 11, dark visor arc on the front (right) side.
+  fillDisk(520, 306, 11, white, 1);
+  const visor = hexRgb("#14104a");
+  for (let y = 295; y <= 317; y++) {
+    for (let x = 509; x <= 531; x++) {
+      const dx = x + 0.5 - 520;
+      const dy = y + 0.5 - 306;
+      if (dx * dx + dy * dy > 121) continue;
+      const vx = x + 0.5 - 525;
+      const vy = y + 0.5 - 306;
+      if (vx * vx + vy * vy <= 42) paint(x, y, visor[0], visor[1], visor[2], 1);
     }
   }
+  // Body capsule ~12 wide x 16 tall.
+  thickLine([[520, 315], [520, 331]], 12, white, 1);
+  // Legs: two short lines.
+  thickLine([[517, 331], [513, 342]], 3, white, 1);
+  thickLine([[523, 331], [527, 342]], 3, white, 1);
+  // One arm raised, waving.
+  thickLine([[525, 318], [536, 304]], 3, white, 1);
+  fillDisk(536, 304, 2.5, white, 1);
+  // Thin gold tether curving from the astronaut down to the whale's back.
+  const tether = openSpline([[515, 331], [506, 335], [496, 337]], 6);
+  thickLine(tether, 2, hexRgb("#ffd76a"), 0.9);
 }
 
-// 7. Astronaut on the whale's back at ~(520, 322)
-{
-  const white = hex("#ffffff");
-  const dark = hex("#1a1440");
-  const gold = hex("#ffd76a");
-  // tether: thin gold curve from the astronaut down-left along the back
-  const tether = quad([518, 330], [492, 348], [466, 339], 24);
-  thickLine(tether, 1.5, gold, 0.9);
-  // legs
-  thickLine([[517, 330], [515, 336]], 3, white, 1);
-  thickLine([[523, 330], [525, 336]], 3, white, 1);
-  // body capsule (rounded rect approx: rect + top/bottom disks)
-  for (let y = 316; y <= 330; y++) {
-    for (let x = 515; x <= 525; x++) {
-      blendPx(x, y, white[0], white[1], white[2], 1);
-    }
-  }
-  disk(520, 316, 5, white, 1);
-  disk(520, 330, 5, white, 1);
-  // raised arm (right side, waving)
-  thickLine([[524, 320], [533, 307]], 2.5, white, 1);
-  disk(534, 306, 2, white, 1);
-  // left arm resting
-  thickLine([[516, 320], [511, 328]], 2.5, white, 1);
-  // helmet
-  disk(520, 307, 9, white, 1);
-  // dark visor arc (front-right of helmet)
-  disk(523, 307, 5, dark, 1);
-  disk(521, 305, 1.5, white, 1);
-  // backpack hint
-  disk(512, 320, 3, hex("#cfe4ff"), 1);
-}
-
-// 8. Vignette: darken corners slightly
-for (let y = 0; y < H; y++) {
-  for (let x = 0; x < W; x++) {
-    const d = Math.hypot(x + 0.5 - W / 2, y + 0.5 - H / 2) / ((W / 2) * Math.SQRT2);
-    const f = 1 - 0.25 * smoothstep(0.55, 1.0, d);
-    const i = (y * W + x) * 3;
-    buf[i] *= f;
-    buf[i + 1] *= f;
-    buf[i + 2] *= f;
-  }
-}
-
-// ================= PNG ENCODER =================
-
-// CRC32, table-driven, polynomial 0xEDB88320
-const CRC_TABLE: Array<number> = (() => {
-  const table: Array<number> = new Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) {
-      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    }
-    table[n] = c >>> 0;
-  }
-  return table;
-})();
-
-function crc32(data: Buffer): number {
-  let c = 0xffffffff;
-  for (let i = 0; i < data.length; i++) {
-    c = CRC_TABLE[(c ^ data[i]) & 0xff] ^ (c >>> 8);
-  }
-  return (c ^ 0xffffffff) >>> 0;
-}
-
-function pngChunk(type: string, data: Buffer): Buffer {
-  const len = Buffer.alloc(4);
-  len.writeUInt32BE(data.length, 0);
-  const typeBuf = Buffer.from(type, "ascii");
-  const crc = Buffer.alloc(4);
-  crc.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])), 0);
-  return Buffer.concat([len, typeBuf, data, crc]);
-}
-
-function encodePNG(): Buffer {
-  // quantise float buffer to bytes, filter 0 per scanline
-  const raw = Buffer.alloc(H * (1 + W * 3));
+// ---- vignette: darken the four corners slightly ----
+function vignette(): void {
+  const cx = W / 2;
+  const cy = H / 2;
+  const maxD = Math.sqrt(cx * cx + cy * cy);
   for (let y = 0; y < H; y++) {
-    const rowStart = y * (1 + W * 3);
-    raw[rowStart] = 0;
     for (let x = 0; x < W; x++) {
+      const dx = x + 0.5 - cx;
+      const dy = y + 0.5 - cy;
+      const d = Math.sqrt(dx * dx + dy * dy) / maxD;
+      const f = smoothstep(0.55, 1.0, d) * 0.25;
+      if (f <= 0) continue;
       const i = (y * W + x) * 3;
-      const o = rowStart + 1 + x * 3;
-      raw[o] = clamp(Math.round(buf[i] * 255), 0, 255);
-      raw[o + 1] = clamp(Math.round(buf[i + 1] * 255), 0, 255);
-      raw[o + 2] = clamp(Math.round(buf[i + 2] * 255), 0, 255);
+      const keep = 1 - f;
+      buf[i] *= keep;
+      buf[i + 1] *= keep;
+      buf[i + 2] *= keep;
     }
   }
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(W, 0);
-  ihdr.writeUInt32BE(H, 4);
-  ihdr[8] = 8; // bit depth
-  ihdr[9] = 2; // colour type 2 (RGB)
-  ihdr[10] = 0; // compression
-  ihdr[11] = 0; // filter
-  ihdr[12] = 0; // no interlace
-  const idat = deflateSync(raw, { level: 9 });
-  return Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    pngChunk("IHDR", ihdr),
-    pngChunk("IDAT", idat),
-    pngChunk("IEND", Buffer.alloc(0)),
-  ]);
 }
 
-// ================= RUN =================
-const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? "out";
-mkdirSync(outDir, { recursive: true });
-const png = encodePNG();
-const outPath = join(outDir, "entry.png");
-writeFileSync(outPath, png);
-const sha = createHash("sha256").update(png).digest("hex");
-console.log(`output: ${outPath}`);
-console.log(`bytes: ${png.length}`);
-console.log(`sha256: ${sha}`);
+// ---- main ----
+function main(): void {
+  drawSky();
+  nebula(750, 220, 260, hexRgb("#ff2d78"), 0.16);
+  nebula(250, 750, 300, hexRgb("#00e5c7"), 0.12);
+  nebula(850, 800, 220, hexRgb("#ffb347"), 0.1);
+  drawStars();
+  drawPlanets();
+  drawWhale();
+  drawTrail();
+  drawAstronaut();
+  vignette();
+  const png = encodePng();
+  mkdirSync(OUT_DIR, { recursive: true });
+  writeFileSync(OUT_PATH, png);
+  const hash = createHash("sha256").update(png).digest("hex");
+  console.log("wrote " + OUT_PATH);
+  console.log("bytes " + png.length);
+  console.log("sha256 " + hash);
+}
+
+main();
+
+
+
